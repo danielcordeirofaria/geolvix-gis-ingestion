@@ -1,0 +1,23 @@
+# Web framework
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+python-multipart==0.0.12
+
+# Configuração
+pydantic-settings==2.6.1
+
+# Banco de dados
+sqlalchemy==2.0.36
+asyncpg==0.30.0
+geoalchemy2==0.15.2
+
+# GIS / Geometria
+shapely==2.0.6
+fiona==1.10.1
+pyproj==3.7.0
+
+# Parsing KML (com proteção XXE)
+lxml==5.3.0
+
+# Observabilidade
+sentry-sdk[fastapi]==2.19.0
