@@ -1,3 +1,4 @@
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
 from app.config import get_settings
@@ -25,23 +26,22 @@ class Base(DeclarativeBase):
     pass
 
 
-async def get_db() -> AsyncSession:
-    """Dependency que fornece uma sessão de banco com o contexto de tenant injetado."""
+async def get_db():
     async with AsyncSessionLocal() as session:
         yield session
 
 
-async def get_db_with_tenant(organizacao_id: int) -> AsyncSession:
+async def get_db_with_tenant(organizacao_id: str):
     """
-    Dependency que fornece uma sessão com o Row-Level Security (RLS) do tenant ativo.
-    Executa SET LOCAL app.current_organization_id antes de liberar a sessão.
-    O RESET é garantido no finally para não vazar para outras conexões do pool (HikariCP-safe).
+    Sessao com Row-Level Security ativa para o tenant.
+    Injeta o UUID da organizacao via SET LOCAL antes de liberar a sessao.
+    RESET garantido no finally para nao vazar entre conexoes do pool.
     """
     async with AsyncSessionLocal() as session:
         try:
             await session.execute(
-                f"SET LOCAL app.current_organization_id = '{organizacao_id}'"
+                text(f"SET LOCAL app.current_organization_id = '{organizacao_id}'")
             )
             yield session
         finally:
-            await session.execute("RESET app.current_organization_id")
+            await session.execute(text("RESET app.current_organization_id"))

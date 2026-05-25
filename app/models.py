@@ -1,27 +1,32 @@
 """
 Mapeamento ORM das tabelas do PostGIS relevantes para o GIS Ingestion Service.
-Espelha o DDL definido no SDD (seção 3.2) — fonte de verdade é o Core Service/Flyway.
+IDs sao UUID conforme o DDL definido em geolvix-infra/db/migration/001_initial_schema.sql.
 """
-from sqlalchemy import BigInteger, Boolean, Column, ForeignKey, Numeric, String, Text, TIMESTAMP
-from sqlalchemy.dialects.postgresql import JSONB
+import uuid
+import datetime
+
+from sqlalchemy import Column, Numeric, String, TIMESTAMP, text
+from sqlalchemy.dialects.postgresql import UUID
 from geoalchemy2 import Geometry
 from app.database import Base
-import datetime
 
 
 class PropriedadeRural(Base):
     __tablename__ = "propriedades_rurais"
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
-    organizacao_id = Column(BigInteger, ForeignKey("organizacoes.id", ondelete="CASCADE"), nullable=False)
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4,
+                server_default=text("gen_random_uuid()"))
+    # FK para organizacoes.id — constraint garantida pelo banco via migration SQL.
+    # Removida do ORM pois o gis-ingestion nao mapeia a tabela organizacoes.
+    organizacao_id = Column(UUID(as_uuid=True), nullable=False)
     nome_propriedade = Column(String(255), nullable=False)
     codigo_car = Column(String(100), unique=True, nullable=True)
 
-    # Geometria armazenada em WGS84 (SRID 4326) após simplificação
+    # Geometria em WGS84 (SRID 4326) apos simplificacao
     geometria = Column(Geometry(geometry_type="POLYGON", srid=4326), nullable=False)
     area_hectares = Column(Numeric(10, 2), nullable=True)
 
-    # LGPD — dados opcionais de produtores, criptografados na camada de serviço
+    # LGPD — opcionais, criptografados pelo Core Service antes de enviar
     produtor_nome_criptografado = Column(String(512), nullable=True)
     produtor_cpf_criptografado = Column(String(512), nullable=True)
 

@@ -1,12 +1,12 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime
+import uuid
 
 
 class PropriedadeUploadResponse(BaseModel):
-    """Resposta retornada após upload e processamento bem-sucedido de um polígono."""
-    id: int
-    organizacao_id: int
+    id: uuid.UUID
+    organizacao_id: uuid.UUID
     nome_propriedade: str
     codigo_car: Optional[str] = None
     area_hectares: float
@@ -18,8 +18,7 @@ class PropriedadeUploadResponse(BaseModel):
 
 
 class PropriedadeGeoJSONResponse(BaseModel):
-    """Resposta com a geometria em GeoJSON para visualização no mapa."""
-    id: int
+    id: uuid.UUID
     geojson: dict
     area_hectares: float
 

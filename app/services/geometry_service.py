@@ -56,7 +56,7 @@ def calculate_area_hectares(polygon: Polygon) -> float:
 
 async def save_propriedade(
     db: AsyncSession,
-    organizacao_id: int,
+    organizacao_id,  # uuid.UUID
     nome_propriedade: str,
     polygon: Polygon,
     codigo_car: str | None = None,
@@ -90,7 +90,7 @@ async def save_propriedade(
     return propriedade
 
 
-async def get_propriedade_geojson(db: AsyncSession, propriedade_id: int) -> dict:
+async def get_propriedade_geojson(db: AsyncSession, propriedade_id) -> dict:  # uuid.UUID
     """
     Retorna a geometria de uma propriedade no formato GeoJSON usando ST_AsGeoJSON do PostGIS.
     """
