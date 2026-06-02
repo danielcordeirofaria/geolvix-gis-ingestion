@@ -3,6 +3,7 @@ Geolvix GIS Ingestion Service — Entry point FastAPI
 Responsável por receber arquivos GIS, simplificar geometrias e persistir no PostGIS.
 Recurso alocado: 1.0 GB RAM | 0.5 vCPU (SDD seção 4)
 """
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -11,8 +12,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import get_settings
 from app.database import engine, Base
 from app.routers import gis
+from app.middleware.request_id import RequestIdMiddleware, RequestIdFilter
 
 settings = get_settings()
+
+# Injeta request_id em todos os logs do serviço
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(request_id)s] [%(levelname)s] %(name)s — %(message)s",
+)
+logging.getLogger().addFilter(RequestIdFilter())
 
 
 @asynccontextmanager
@@ -36,6 +45,9 @@ app = FastAPI(
     redoc_url="/redoc" if settings.DEBUG else None,
     lifespan=lifespan,
 )
+
+# Request ID — deve ser o primeiro middleware (roda por último no response)
+app.add_middleware(RequestIdMiddleware)
 
 # CORS — apenas origens internas do cluster são necessárias
 app.add_middleware(
