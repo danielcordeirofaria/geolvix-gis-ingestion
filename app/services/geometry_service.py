@@ -8,7 +8,7 @@ Fluxo (SDD seção 6, passo 2):
 4. Converte para WKT e persiste no PostGIS via SQLAlchemy + GeoAlchemy2
 """
 import math
-from shapely.geometry import Polygon, mapping
+from shapely.geometry import Polygon, Point, mapping
 from shapely.ops import transform
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -92,7 +92,8 @@ async def save_propriedade(
 
 async def get_propriedade_geojson(db: AsyncSession, propriedade_id) -> dict:  # uuid.UUID
     """
-    Retorna a geometria de uma propriedade no formato GeoJSON usando ST_AsGeoJSON do PostGIS.
+    Retorna a geometria da fazenda completa em GeoJSON via ST_AsGeoJSON do PostGIS.
+    Usada pelo Satellite Worker para análise NDVI e pelo DDS como polygon_farm.geojson.
     """
     result = await db.execute(
         text(
@@ -105,3 +106,166 @@ async def get_propriedade_geojson(db: AsyncSession, propriedade_id) -> dict:  # 
     if not row:
         return None
     return {"geojson": row.geojson, "area_hectares": float(row.area_hectares)}
+
+
+# ── Talhão de produção ────────────────────────────────────────────────────────
+
+async def save_producao_polygon(
+    db: AsyncSession,
+    propriedade_id,  # uuid.UUID
+    polygon: Polygon,
+) -> dict:
+    """
+    Persiste o polígono do talhão de produção em geometria_producao.
+
+    Aplica a mesma simplificação Douglas-Peucker da fazenda para manter consistência.
+    Calcula e salva area_producao_hectares.
+
+    Ref: EUDR FAQ 1.7/1.15 — o talhão representa apenas a área produtiva,
+    não o perímetro total da fazenda.
+    """
+    simplified = simplify_geometry(polygon)
+    area_ha = calculate_area_hectares(simplified)
+    geom_wkb = from_shape(simplified, srid=4326)
+
+    vertices_originais = len(polygon.exterior.coords)
+    vertices_simplificados = len(simplified.exterior.coords)
+
+    await db.execute(
+        text(
+            "UPDATE propriedades_rurais "
+            "SET geometria_producao = ST_GeomFromWKB(:geom, 4326), "
+            "    area_producao_hectares = :area "
+            "WHERE id = :id"
+        ),
+        {"geom": geom_wkb.desc, "area": area_ha, "id": str(propriedade_id)},
+    )
+    await db.commit()
+
+    return {
+        "id": propriedade_id,
+        "area_producao_hectares": area_ha,
+        "vertices_originais": vertices_originais,
+        "vertices_simplificados": vertices_simplificados,
+    }
+
+
+async def get_producao_geojson(db: AsyncSession, propriedade_id) -> dict | None:
+    """
+    Retorna o GeoJSON da localização de produção via ST_AsGeoJSON.
+
+    Lógica de prioridade (EUDR FAQ 1.7/1.15):
+      1. geometria_producao (polígono) — se existir, retorna com tipo="POLIGONO"
+      2. ponto_producao (ponto)        — fallback para propriedades < 4 ha, tipo="PONTO"
+      3. None — nenhuma localização de produção cadastrada
+
+    Retorna dict com: geojson, tipo ("POLIGONO" ou "PONTO"), area_producao_hectares (None para ponto).
+    Usado pelo DdsPackageService para gerar polygon_eudr.geojson.
+    """
+    # Prioridade 1: polígono de produção
+    result = await db.execute(
+        text(
+            "SELECT ST_AsGeoJSON(geometria_producao)::json AS geojson, "
+            "       area_producao_hectares "
+            "FROM propriedades_rurais "
+            "WHERE id = :id AND geometria_producao IS NOT NULL"
+        ),
+        {"id": str(propriedade_id)},
+    )
+    row = result.fetchone()
+    if row:
+        return {
+            "geojson": row.geojson,
+            "area_producao_hectares": float(row.area_producao_hectares),
+            "tipo": "POLIGONO",
+        }
+
+    # Prioridade 2: ponto de produção (< 4 ha, EUDR FAQ 1.7)
+    result = await db.execute(
+        text(
+            "SELECT ST_AsGeoJSON(ponto_producao)::json AS geojson, "
+            "       ponto_producao_lat, ponto_producao_lon "
+            "FROM propriedades_rurais "
+            "WHERE id = :id AND ponto_producao IS NOT NULL"
+        ),
+        {"id": str(propriedade_id)},
+    )
+    row = result.fetchone()
+    if row:
+        return {
+            "geojson": row.geojson,
+            "area_producao_hectares": None,  # ponto não tem área calculável
+            "tipo": "PONTO",
+        }
+
+    return None
+
+
+async def save_ponto_producao(
+    db: AsyncSession,
+    propriedade_id,  # uuid.UUID
+    latitude: float,
+    longitude: float,
+) -> dict | None:
+    """
+    Persiste o ponto de localização do talhão de produção (EUDR FAQ 1.7).
+
+    Usado para propriedades/talhões com área < 4 ha, onde o EUDR IS aceita
+    um único ponto lat/lon em vez de polígono completo.
+
+    Salva:
+      - ponto_producao: GEOMETRY(Point, 4326) no PostGIS para operações espaciais
+      - ponto_producao_lat / ponto_producao_lon: colunas decimais para leitura pelo Core
+
+    Idempotente — sobrescreve se ponto já existia.
+    Retorna None se a propriedade não for encontrada.
+    """
+    result = await db.execute(
+        text(
+            "UPDATE propriedades_rurais "
+            "SET ponto_producao     = ST_SetSRID(ST_MakePoint(:lon, :lat), 4326), "
+            "    ponto_producao_lat = :lat, "
+            "    ponto_producao_lon = :lon "
+            "WHERE id = :id "
+            "RETURNING id"
+        ),
+        {"lat": latitude, "lon": longitude, "id": str(propriedade_id)},
+    )
+    row = result.fetchone()
+    if not row:
+        return None
+    await db.commit()
+    return {
+        "id": propriedade_id,
+        "latitude": latitude,
+        "longitude": longitude,
+    }
+
+
+async def copiar_fazenda_como_producao(db: AsyncSession, propriedade_id) -> dict | None:
+    """
+    Copia geometria (fazenda completa) para geometria_producao sem nenhum upload adicional.
+
+    Caso de uso: quando a área produtiva é toda a fazenda — o operador não precisa
+    de um shapefile separado do talhão. Resolve o Gap 1 de UX (SDD Seção 6.2).
+
+    Retorna None se a propriedade não for encontrada.
+    """
+    result = await db.execute(
+        text(
+            "UPDATE propriedades_rurais "
+            "SET geometria_producao = geometria, "
+            "    area_producao_hectares = area_hectares "
+            "WHERE id = :id "
+            "RETURNING area_hectares"
+        ),
+        {"id": str(propriedade_id)},
+    )
+    row = result.fetchone()
+    if not row:
+        return None
+    await db.commit()
+    return {
+        "id": propriedade_id,
+        "area_producao_hectares": float(row.area_hectares),
+    }

@@ -22,9 +22,26 @@ class PropriedadeRural(Base):
     nome_propriedade = Column(String(255), nullable=False)
     codigo_car = Column(String(100), unique=True, nullable=True)
 
-    # Geometria em WGS84 (SRID 4326) apos simplificacao
+    # Geometria da fazenda completa em WGS84 (SRID 4326) apos simplificacao.
+    # Usada na analise NDVI/desmatamento (cobre toda a propriedade).
     geometria = Column(Geometry(geometry_type="POLYGON", srid=4326), nullable=False)
     area_hectares = Column(Numeric(10, 2), nullable=True)
+
+    # Geometria do talhao de producao — subconjunto da fazenda onde a commodity e cultivada.
+    # Null ate o operador fazer upload via PATCH /poligono-producao ou copiar via /copiar-fazenda.
+    # Usada no polygon_eudr.geojson do Pacote DDS (EUDR FAQ 1.7/1.15).
+    # Adicionada pela migration 010_poligono_producao.sql.
+    geometria_producao = Column(Geometry(geometry_type="POLYGON", srid=4326), nullable=True)
+    area_producao_hectares = Column(Numeric(10, 2), nullable=True)
+
+    # Ponto de localizacao para propriedades/talhoes < 4 ha (EUDR FAQ 1.7).
+    # Alternativa ao poligono — o EUDR IS aceita lat/lon simples para areas pequenas.
+    # Prioridade no DDS: geometria_producao (poligono) > ponto_producao (ponto).
+    # ponto_producao_lat / _lon: duplicadas para leitura pelo Core/Hibernate sem tipo PostGIS.
+    # Adicionadas pela migration 011_ponto_producao.sql.
+    ponto_producao = Column(Geometry(geometry_type="POINT", srid=4326), nullable=True)
+    ponto_producao_lat = Column(Numeric(9, 6), nullable=True)
+    ponto_producao_lon = Column(Numeric(11, 6), nullable=True)
 
     # LGPD — opcionais, criptografados pelo Core Service antes de enviar
     produtor_nome_criptografado = Column(String(512), nullable=True)
