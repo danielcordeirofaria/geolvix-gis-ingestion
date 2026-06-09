@@ -269,3 +269,141 @@ async def copiar_fazenda_como_producao(db: AsyncSession, propriedade_id) -> dict
         "id": propriedade_id,
         "area_producao_hectares": float(row.area_hectares),
     }
+
+
+# ── Talhões de Produção (Decisão 21) ─────────────────────────────────────────
+
+async def save_talhao_polygon(
+    db: AsyncSession,
+    talhao_id,  # uuid.UUID
+    polygon: Polygon,
+) -> dict:
+    """
+    Persiste o polígono do talhão de produção na tabela talhoes_producao.
+    Aplica simplificação Douglas-Peucker e calcula area_hectares.
+    """
+    simplified = simplify_geometry(polygon)
+    area_ha = calculate_area_hectares(simplified)
+    geom_wkb = from_shape(simplified, srid=4326)
+
+    vertices_originais = len(polygon.exterior.coords)
+    vertices_simplificados = len(simplified.exterior.coords)
+
+    await db.execute(
+        text(
+            "UPDATE talhoes_producao "
+            "SET geometria     = ST_GeomFromWKB(:geom, 4326), "
+            "    area_hectares = :area "
+            "WHERE id = :id"
+        ),
+        {"geom": geom_wkb.desc, "area": area_ha, "id": str(talhao_id)},
+    )
+    await db.commit()
+
+    return {
+        "id": talhao_id,
+        "area_hectares": area_ha,
+        "vertices_originais": vertices_originais,
+        "vertices_simplificados": vertices_simplificados,
+    }
+
+
+async def get_talhao_geojson(db: AsyncSession, talhao_id) -> dict | None:
+    """
+    Retorna o GeoJSON da localização do talhão via ST_AsGeoJSON.
+
+    Prioridade (EUDR FAQ 1.7/1.15):
+      1. geometria (polígono) → tipo="POLIGONO"
+      2. ponto_producao (ponto) → tipo="PONTO" (talhões < 4 ha)
+      3. None → localização não cadastrada
+    """
+    # Prioridade 1: polígono
+    result = await db.execute(
+        text(
+            "SELECT ST_AsGeoJSON(geometria)::json AS geojson, area_hectares "
+            "FROM talhoes_producao "
+            "WHERE id = :id AND geometria IS NOT NULL AND deleted_at IS NULL"
+        ),
+        {"id": str(talhao_id)},
+    )
+    row = result.fetchone()
+    if row:
+        return {
+            "geojson": row.geojson,
+            "area_hectares": float(row.area_hectares),
+            "tipo": "POLIGONO",
+        }
+
+    # Prioridade 2: ponto (< 4 ha)
+    result = await db.execute(
+        text(
+            "SELECT ST_AsGeoJSON(ponto_producao)::json AS geojson, "
+            "       ponto_producao_lat, ponto_producao_lon "
+            "FROM talhoes_producao "
+            "WHERE id = :id AND ponto_producao IS NOT NULL AND deleted_at IS NULL"
+        ),
+        {"id": str(talhao_id)},
+    )
+    row = result.fetchone()
+    if row:
+        return {
+            "geojson": row.geojson,
+            "area_hectares": None,
+            "tipo": "PONTO",
+        }
+
+    return None
+
+
+async def save_ponto_talhao(
+    db: AsyncSession,
+    talhao_id,  # uuid.UUID
+    latitude: float,
+    longitude: float,
+) -> dict | None:
+    """Persiste o ponto de localização do talhão (< 4 ha, EUDR FAQ 1.7)."""
+    result = await db.execute(
+        text(
+            "UPDATE talhoes_producao "
+            "SET ponto_producao     = ST_SetSRID(ST_MakePoint(:lon, :lat), 4326), "
+            "    ponto_producao_lat = :lat, "
+            "    ponto_producao_lon = :lon "
+            "WHERE id = :id AND deleted_at IS NULL "
+            "RETURNING id"
+        ),
+        {"lat": latitude, "lon": longitude, "id": str(talhao_id)},
+    )
+    row = result.fetchone()
+    if not row:
+        return None
+    await db.commit()
+    return {"id": talhao_id, "latitude": latitude, "longitude": longitude}
+
+
+async def copiar_fazenda_para_talhao(
+    db: AsyncSession,
+    talhao_id,      # uuid.UUID
+    propriedade_id, # uuid.UUID
+) -> dict | None:
+    """
+    Copia a geometria da fazenda completa como polígono do talhão.
+    Caso de uso: toda a fazenda é produtiva para essa commodity.
+    """
+    result = await db.execute(
+        text(
+            "UPDATE talhoes_producao t "
+            "SET geometria     = pr.geometria, "
+            "    area_hectares = pr.area_hectares "
+            "FROM propriedades_rurais pr "
+            "WHERE t.id = :talhao_id "
+            "  AND t.propriedade_id = :propriedade_id "
+            "  AND t.deleted_at IS NULL "
+            "RETURNING t.id, pr.area_hectares"
+        ),
+        {"talhao_id": str(talhao_id), "propriedade_id": str(propriedade_id)},
+    )
+    row = result.fetchone()
+    if not row:
+        return None
+    await db.commit()
+    return {"id": talhao_id, "area_hectares": float(row.area_hectares)}

@@ -63,3 +63,33 @@ class CopiarFazendaResponse(BaseModel):
 
 class ErrorResponse(BaseModel):
     detail: str
+
+
+# ── Talhões de Produção (Decisão 21) ─────────────────────────────────────────
+
+class TalhaoUploadResponse(BaseModel):
+    id: uuid.UUID
+    area_hectares: float
+    vertices_originais: int
+    vertices_simplificados: int
+
+
+class TalhaoGeoJSONResponse(BaseModel):
+    """GeoJSON do talhão — exportado como polygon_eudr.geojson. tipo: POLIGONO ou PONTO."""
+    id: uuid.UUID
+    geojson: dict
+    area_hectares: Optional[float] = None
+    tipo: str = "POLIGONO"
+
+
+class TalhaoPontoResponse(BaseModel):
+    id: uuid.UUID
+    latitude: float
+    longitude: float
+    message: str
+
+
+class TalhaoCopiarFazendaResponse(BaseModel):
+    id: uuid.UUID
+    area_hectares: float
+    message: str

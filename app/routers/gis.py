@@ -2,16 +2,16 @@
 Router principal do GIS Ingestion Service.
 
 Endpoints — Fazenda completa:
-  POST /api/v1/gis/upload                        — Upload do polígono da fazenda
-  GET  /api/v1/gis/{id}/geojson                  — GeoJSON da fazenda (análise NDVI)
+  POST /api/v1/gis/upload                              — Upload do polígono da fazenda
+  GET  /api/v1/gis/{id}/geojson                        — GeoJSON da fazenda (análise NDVI)
 
-Endpoints — Talhão de produção (EUDR FAQ 1.7/1.15):
-  POST /api/v1/gis/{id}/producao/upload          — Upload do polígono do talhão (>= 4 ha)
-  GET  /api/v1/gis/{id}/producao/geojson         — GeoJSON do talhão (polygon_eudr.geojson)
-  POST /api/v1/gis/{id}/producao/copiar-fazenda  — Copia fazenda como talhão (sem upload extra)
-  POST /api/v1/gis/{id}/producao/ponto           — Informa ponto lat/lon (< 4 ha, FAQ 1.7)
+Endpoints — Talhões de Produção (Decisão 21 — Multi-Talhão):
+  POST /api/v1/gis/talhoes/{id}/upload                 — Upload do polígono do talhão (>= 4 ha)
+  GET  /api/v1/gis/talhoes/{id}/geojson                — GeoJSON do talhão (polygon_eudr.geojson)
+  POST /api/v1/gis/talhoes/{id}/ponto                  — Ponto lat/lon para talhão < 4 ha (FAQ 1.7)
+  POST /api/v1/gis/talhoes/{id}/copiar-fazenda         — Copia fazenda como área do talhão
 
-  GET  /api/v1/gis/health                        — Health check (Docker/balanceador)
+  GET  /api/v1/gis/health                              — Health check
 """
 import os
 import tempfile
@@ -27,12 +27,14 @@ from app.schemas.gis import (
     PropriedadeUploadResponse, PropriedadeGeoJSONResponse,
     ProducaoUploadResponse, ProducaoGeoJSONResponse, CopiarFazendaResponse,
     PontoProducaoResponse,
+    TalhaoUploadResponse, TalhaoGeoJSONResponse, TalhaoPontoResponse, TalhaoCopiarFazendaResponse,
 )
 from app.services import file_parser
 from app.services.geometry_service import (
     save_propriedade, get_propriedade_geojson,
     save_producao_polygon, get_producao_geojson, copiar_fazenda_como_producao,
     save_ponto_producao,
+    save_talhao_polygon, get_talhao_geojson, save_ponto_talhao, copiar_fazenda_para_talhao,
 )
 from app.utils.auth import verify_internal_token
 from app.utils.security import validate_file_extension, validate_file_size
@@ -347,4 +349,154 @@ async def copiar_fazenda_endpoint(
         id=result["id"],
         area_producao_hectares=result["area_producao_hectares"],
         message="Geometria da fazenda copiada como talhão de produção com sucesso.",
+    )
+
+
+# ── Talhões de Produção (Decisão 21 — Multi-Talhão / Multi-Commodity) ────────
+
+@router.post(
+    "/talhoes/{talhao_id}/upload",
+    response_model=TalhaoUploadResponse,
+    status_code=status.HTTP_200_OK,
+    dependencies=[Depends(verify_internal_token)],
+    summary="Upload do polígono de produção de um talhão (>= 4 ha)",
+)
+async def upload_talhao_poligono(
+    talhao_id: uuid.UUID,
+    file: UploadFile = File(...),
+    organizacao_id: uuid.UUID = Form(...),
+):
+    """
+    Persiste o polígono de produção do talhão em talhoes_producao.geometria.
+    O RLS do PostgreSQL garante que apenas talhões da organização sejam acessíveis.
+    """
+    file_type = validate_file_extension(file.filename)
+    content = await file.read()
+    validate_file_size(len(content))
+
+    try:
+        if file_type == "geojson":
+            polygon = file_parser.parse_geojson(content)
+        elif file_type == "kml":
+            polygon = file_parser.parse_kml(content)
+        elif file_type == "shp":
+            with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+                tmp.write(content)
+                tmp_path = tmp.name
+            try:
+                polygon = file_parser.parse_shapefile_zip(tmp_path)
+            finally:
+                os.unlink(tmp_path)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail=f"Erro ao processar o arquivo geoespacial do talhão: {e}")
+
+    result = None
+    async for db in get_db_with_tenant(str(organizacao_id)):
+        result = await save_talhao_polygon(db, talhao_id, polygon)
+
+    return TalhaoUploadResponse(
+        id=result["id"],
+        area_hectares=result["area_hectares"],
+        vertices_originais=result["vertices_originais"],
+        vertices_simplificados=result["vertices_simplificados"],
+    )
+
+
+@router.get(
+    "/talhoes/{talhao_id}/geojson",
+    response_model=TalhaoGeoJSONResponse,
+    dependencies=[Depends(verify_internal_token)],
+    summary="GeoJSON do talhão — polygon_eudr.geojson da DDS",
+)
+async def get_talhao_geojson_endpoint(
+    talhao_id: uuid.UUID,
+    organizacao_id: uuid.UUID,
+):
+    """
+    Retorna o GeoJSON da localização do talhão. Prioridade: polígono > ponto.
+    HTTP 404 se localização ainda não foi cadastrada.
+    """
+    result = None
+    async for db in get_db_with_tenant(str(organizacao_id)):
+        result = await get_talhao_geojson(db, talhao_id)
+
+    if not result:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=(
+                f"Localização não encontrada para o talhão {talhao_id}. "
+                "Faça upload do polígono via /talhoes/{id}/upload ou "
+                "informe o ponto via /talhoes/{id}/ponto (< 4 ha, EUDR FAQ 1.7)."
+            ),
+        )
+    return TalhaoGeoJSONResponse(
+        id=talhao_id,
+        geojson=result["geojson"],
+        area_hectares=result.get("area_hectares"),
+        tipo=result.get("tipo", "POLIGONO"),
+    )
+
+
+@router.post(
+    "/talhoes/{talhao_id}/ponto",
+    response_model=TalhaoPontoResponse,
+    status_code=status.HTTP_200_OK,
+    dependencies=[Depends(verify_internal_token)],
+    summary="Informa ponto lat/lon para talhão < 4 ha (EUDR FAQ 1.7)",
+)
+async def informar_ponto_talhao(
+    talhao_id: uuid.UUID,
+    organizacao_id: uuid.UUID = Form(...),
+    latitude: float = Form(..., ge=-34.0, le=6.0,
+                           description="Latitude WGS84 — domínio Brasil (-34° a 6°)"),
+    longitude: float = Form(..., ge=-74.0, le=-28.0,
+                            description="Longitude WGS84 — domínio Brasil (-74° a -28°)"),
+):
+    result = None
+    async for db in get_db_with_tenant(str(organizacao_id)):
+        result = await save_ponto_talhao(db, talhao_id, latitude, longitude)
+
+    if not result:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail=f"Talhão {talhao_id} não encontrado.")
+
+    return TalhaoPontoResponse(
+        id=result["id"],
+        latitude=result["latitude"],
+        longitude=result["longitude"],
+        message=f"Ponto salvo: lat={latitude:.6f}, lon={longitude:.6f}.",
+    )
+
+
+@router.post(
+    "/talhoes/{talhao_id}/copiar-fazenda",
+    response_model=TalhaoCopiarFazendaResponse,
+    status_code=status.HTTP_200_OK,
+    dependencies=[Depends(verify_internal_token)],
+    summary="Copia a geometria da fazenda como área de produção do talhão",
+)
+async def copiar_fazenda_para_talhao_endpoint(
+    talhao_id: uuid.UUID,
+    organizacao_id: uuid.UUID = Form(...),
+    propriedade_id: uuid.UUID = Form(..., description="UUID da fazenda de origem"),
+):
+    """
+    Copia geometria da fazenda → polígono do talhão sem upload extra.
+    Caso de uso: toda a fazenda é produtiva para essa commodity.
+    """
+    result = None
+    async for db in get_db_with_tenant(str(organizacao_id)):
+        result = await copiar_fazenda_para_talhao(db, talhao_id, propriedade_id)
+
+    if not result:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Talhão {talhao_id} ou propriedade {propriedade_id} não encontrados.",
+        )
+
+    return TalhaoCopiarFazendaResponse(
+        id=result["id"],
+        area_hectares=result["area_hectares"],
+        message="Geometria da fazenda copiada como área de produção do talhão.",
     )
